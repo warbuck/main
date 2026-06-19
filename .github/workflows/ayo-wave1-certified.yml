@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/ayo-wave1-certified.yml'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
