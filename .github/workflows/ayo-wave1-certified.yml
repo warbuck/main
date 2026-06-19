@@ -17,10 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
+      MODEL_REPO: TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF
       MODEL_URL: https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf?download=true
       MODEL_FILE: tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
       EXPECTED_SHA256: 9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0
       RELEASE_NAME: AyO_1B_Frozen_Foundation_Certified_15.1
+      HF_HUB_DISABLE_TELEMETRY: 1
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,24 +31,40 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y p7zip-full cmake build-essential curl jq
+          python3 -m pip install --upgrade huggingface_hub hf_xet
 
       - name: Download exact GGUF and provenance files
         run: |
           set -euo pipefail
           mkdir -p work/model work/provenance work/runtime work/benchmarks work/recovery work/manifests
-          curl -fL --retry 8 --retry-all-errors --connect-timeout 30 \
-            -o "work/model/${MODEL_FILE}" "${MODEL_URL}"
+          if ! hf download "${MODEL_REPO}" "${MODEL_FILE}" --local-dir work/model; then
+            curl -fL --retry 8 --retry-all-errors --connect-timeout 30 \
+              -o "work/model/${MODEL_FILE}" "${MODEL_URL}"
+          fi
+          test -s "work/model/${MODEL_FILE}"
           echo "${EXPECTED_SHA256}  work/model/${MODEL_FILE}" | sha256sum -c -
           curl -fL --retry 5 -o work/provenance/TINYLLAMA_MODEL_CARD.md \
-            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/README.md
+            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/README.md || true
           curl -fL --retry 5 -o work/provenance/LICENSE \
-            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/LICENSE
+            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/LICENSE || \
+            curl -fL --retry 5 -o work/provenance/LICENSE https://www.apache.org/licenses/LICENSE-2.0.txt
           curl -fL --retry 5 -o work/provenance/config.json \
-            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/config.json
+            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/config.json || true
           curl -fL --retry 5 -o work/provenance/tokenizer_config.json \
-            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/tokenizer_config.json
+            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/tokenizer_config.json || true
           curl -fL --retry 5 -o work/provenance/special_tokens_map.json \
-            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/special_tokens_map.json
+            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/special_tokens_map.json || true
+          cat > work/provenance/PROVENANCE.json <<'EOF'
+          {
+            "upstream_model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            "gguf_repository": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+            "gguf_filename": "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+            "license": "Apache-2.0",
+            "quantization": "Q4_K_M",
+            "expected_sha256": "9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0",
+            "claim_boundary": "upstream pretrained and chat aligned; no AyO specialist fine-tuning is claimed in Wave 1"
+          }
+          EOF
 
       - name: Build llama.cpp runtime verifier
         run: |
@@ -103,7 +121,7 @@ jobs:
               'model_sha256': h,
               'expected_sha256': os.environ['EXPECTED_SHA256'],
               'model_bytes': model.stat().st_size,
-              'source': 'TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF',
+              'source': os.environ['MODEL_REPO'],
               'upstream': 'TinyLlama/TinyLlama-1.1B-Chat-v1.0',
               'license': 'Apache-2.0',
               'quantization': 'Q4_K_M',
