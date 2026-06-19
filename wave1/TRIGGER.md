@@ -1,3 +1,3 @@
 # AyO Wave 1 Certification Run
 
-This branch exists only to trigger the observable pull-request certification workflow for the 1.1B frozen foundation.
+Second observable run using the Xet-aware Hugging Face acquisition route and mandatory GGUF SHA-256 verification.
