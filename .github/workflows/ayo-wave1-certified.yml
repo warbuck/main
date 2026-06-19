@@ -1,0 +1,188 @@
+name: AyO Wave 1 Certified Foundation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ayo-wave1-certified.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-foundation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      MODEL_URL: https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf?download=true
+      MODEL_FILE: tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+      EXPECTED_SHA256: 9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0
+      RELEASE_NAME: AyO_1B_Frozen_Foundation_Certified_15.1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build and packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full cmake build-essential curl jq
+
+      - name: Download exact GGUF and provenance files
+        run: |
+          set -euo pipefail
+          mkdir -p work/model work/provenance work/runtime work/benchmarks work/recovery work/manifests
+          curl -fL --retry 8 --retry-all-errors --connect-timeout 30 \
+            -o "work/model/${MODEL_FILE}" "${MODEL_URL}"
+          echo "${EXPECTED_SHA256}  work/model/${MODEL_FILE}" | sha256sum -c -
+          curl -fL --retry 5 -o work/provenance/TINYLLAMA_MODEL_CARD.md \
+            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/README.md
+          curl -fL --retry 5 -o work/provenance/LICENSE \
+            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/LICENSE
+          curl -fL --retry 5 -o work/provenance/config.json \
+            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/config.json
+          curl -fL --retry 5 -o work/provenance/tokenizer_config.json \
+            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/tokenizer_config.json
+          curl -fL --retry 5 -o work/provenance/special_tokens_map.json \
+            https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/raw/main/special_tokens_map.json
+
+      - name: Build llama.cpp runtime verifier
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git work/llama.cpp
+          cmake -S work/llama.cpp -B work/llama.cpp/build \
+            -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DLLAMA_CURL=OFF -DGGML_OPENMP=ON
+          cmake --build work/llama.cpp/build --config Release -j2 --target llama-cli
+          cp work/llama.cpp/build/bin/llama-cli work/runtime/llama-cli-linux-x64
+
+      - name: Run deterministic foundation certification
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, hashlib, time, re
+          root = pathlib.Path('work')
+          model = root/'model'/os.environ['MODEL_FILE']
+          cli = root/'runtime'/'llama-cli-linux-x64'
+          cases = [
+              ('identity', 'State in one sentence that you are a small local foundation model assisting AyO.'),
+              ('arithmetic', 'What is 2 plus 2? Answer with the number and no explanation.'),
+              ('coding', 'Write only a valid Python function named add that returns a plus b.'),
+              ('intent', 'Convert this request into three labels: goal, constraint, success: Build a local notes app that works offline and preserves the existing design.'),
+              ('uncertainty', 'You do not know whether a file exists. Explain briefly what you should verify before claiming it exists.'),
+          ]
+          outputs = {}
+          start = time.time()
+          for name, user in cases:
+              prompt = f'<|system|>\nYou are AyO Foundation. Be concise, honest, and technical.</s>\n<|user|>\n{user}</s>\n<|assistant|>\n'
+              cmd = [str(cli), '-m', str(model), '-p', prompt, '-n', '96', '--temp', '0', '--seed', '42', '--no-display-prompt', '-t', '2']
+              p = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+              (root/'benchmarks'/f'{name}.stdout.txt').write_text(p.stdout, encoding='utf-8')
+              (root/'benchmarks'/f'{name}.stderr.txt').write_text(p.stderr, encoding='utf-8')
+              if p.returncode != 0:
+                  raise SystemExit(f'{name} inference failed: {p.returncode}')
+              text = p.stdout.strip()
+              if len(text) < 3:
+                  raise SystemExit(f'{name} returned empty output')
+              outputs[name] = text
+          checks = {
+              'runtime_load': True,
+              'all_outputs_nonempty': all(len(v) >= 3 for v in outputs.values()),
+              'arithmetic_mentions_4': bool(re.search(r'(^|\D)4(\D|$)', outputs['arithmetic'])),
+              'coding_has_function': ('def add' in outputs['coding'] and 'return' in outputs['coding']),
+              'intent_has_structure': sum(k in outputs['intent'].lower() for k in ('goal','constraint','success')) >= 2,
+              'uncertainty_requires_verification': any(k in outputs['uncertainty'].lower() for k in ('verify','check','inspect','confirm')),
+          }
+          required = ['runtime_load','all_outputs_nonempty','arithmetic_mentions_4','coding_has_function','uncertainty_requires_verification']
+          passed = all(checks[k] for k in required)
+          h = hashlib.sha256(model.read_bytes()).hexdigest()
+          report = {
+              'release': os.environ['RELEASE_NAME'],
+              'model_file': model.name,
+              'model_sha256': h,
+              'expected_sha256': os.environ['EXPECTED_SHA256'],
+              'model_bytes': model.stat().st_size,
+              'source': 'TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF',
+              'upstream': 'TinyLlama/TinyLlama-1.1B-Chat-v1.0',
+              'license': 'Apache-2.0',
+              'quantization': 'Q4_K_M',
+              'target_parameters': 1100000000,
+              'certification_checks': checks,
+              'required_checks': required,
+              'certified': passed and h == os.environ['EXPECTED_SHA256'],
+              'elapsed_seconds': round(time.time()-start, 3),
+              'outputs': outputs,
+              'scope': 'foundation load, basic generation, elementary coding, honesty; not AyO specialist training',
+          }
+          (root/'benchmarks'/'FOUNDATION_CERTIFICATION.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+          if not report['certified']:
+              raise SystemExit('Foundation certification failed')
+          PY
+
+      - name: Build AyO model contract and manifests
+        run: |
+          set -euo pipefail
+          cat > work/runtime/Modelfile <<'EOF'
+          FROM ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+          PARAMETER temperature 0.2
+          PARAMETER num_ctx 4096
+          PARAMETER top_p 0.9
+          SYSTEM "You are AyO Foundation, the frozen local language-and-code foundation beneath Triton 7. Be concise, truthful, and explicit about uncertainty. Never claim a file, test, or tool result exists without evidence."
+          EOF
+          cat > work/runtime/AYO_FOUNDATION_CONTRACT.json <<'EOF'
+          {
+            "wave": 1,
+            "role": "frozen_shared_foundation",
+            "model_family": "TinyLlama",
+            "parameter_target": 1100000000,
+            "quantization": "Q4_K_M",
+            "startup_policy": "lazy_load_only",
+            "network_policy": "no_network_required_after_install",
+            "specialist_dependency": "all later waves must record this foundation SHA256",
+            "training_claim": "upstream pretrained and chat aligned; not yet AyO specialist fine-tuned"
+          }
+          EOF
+          cp "work/model/${MODEL_FILE}" work/recovery/
+          find work -type f -not -path 'work/llama.cpp/*' -print0 | sort -z | xargs -0 sha256sum > work/manifests/SHA256SUMS.txt
+          python3 - <<'PY'
+          import json, pathlib, hashlib, os
+          root=pathlib.Path('work')
+          files=[]
+          for p in sorted(root.rglob('*')):
+              if not p.is_file() or 'llama.cpp' in p.parts: continue
+              files.append({'path':str(p.relative_to(root)),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          manifest={'release':os.environ['RELEASE_NAME'],'status':'CERTIFIED_FOUNDATION','file_count':len(files),'files':files}
+          (root/'manifests'/'WAVE1_MANIFEST.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
+          PY
+
+      - name: Create normal-compression multipart 7-Zip release
+        run: |
+          set -euo pipefail
+          rm -rf release_stage
+          mkdir -p "release_stage/${RELEASE_NAME}"
+          cp -a work/model work/provenance work/runtime work/benchmarks work/recovery work/manifests "release_stage/${RELEASE_NAME}/"
+          cat > "release_stage/${RELEASE_NAME}/README.txt" <<'EOF'
+          AyO Wave 1 certified frozen foundation.
+          Keep all .7z.00x volumes together. Extract from .7z.001 only.
+          This is an upstream-pretrained 1.1B foundation, not the later AyO 3B specialist training waves.
+          EOF
+          7z a -t7z -mx=5 -m0=lzma2 -v64m "${RELEASE_NAME}.7z" "release_stage/${RELEASE_NAME}"
+          sha256sum "${RELEASE_NAME}.7z."* > "${RELEASE_NAME}_VOLUME_SHA256.txt"
+          cat "${RELEASE_NAME}.7z."* > combined.7z
+          7z t combined.7z
+          mkdir verify_extract
+          7z x combined.7z -overify_extract >/dev/null
+          test -f "verify_extract/${RELEASE_NAME}/model/${MODEL_FILE}"
+          sha256sum "verify_extract/${RELEASE_NAME}/model/${MODEL_FILE}" | grep -q "${EXPECTED_SHA256}"
+          rm combined.7z
+
+      - name: Upload certified release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ayo-wave1-certified-foundation
+          path: |
+            AyO_1B_Frozen_Foundation_Certified_15.1.7z.*
+            AyO_1B_Frozen_Foundation_Certified_15.1_VOLUME_SHA256.txt
+            work/benchmarks/FOUNDATION_CERTIFICATION.json
+            work/manifests/WAVE1_MANIFEST.json
+          compression-level: 0
+          retention-days: 30
