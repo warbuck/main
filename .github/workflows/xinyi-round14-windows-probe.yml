@@ -1,0 +1,31 @@
+name: Xinyi Round14 Windows Probe
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-windows-probe:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Run native Windows probe
+        shell: powershell
+        run: ./ci/windows-native-probe.ps1
+      - name: Upload probe receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xinyi-round14-windows-probe-receipt
+          path: |
+            WINDOWS_HOSTED_PROBE_RECEIPT.json
+            WINDOWS_HOSTED_PROBE_RECEIPT.json.sha256
+          if-no-files-found: error
